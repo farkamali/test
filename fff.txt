@@ -1,0 +1,9 @@
+curl -X 'POST' \
+  'https://webapi-zybank.sandpod.ir/api/BaseInfo/RemoveCacheByKey' \
+  -H 'accept: text/plain' \
+  -H 'X-Version: .1.0' \
+  -H 'Authorization: 8238773832-2b07eFd73ef34cf7903ad71811df6175.XzIwMjY3' \
+  -H 'Content-Type: application/json-patch+json' \
+  -d '{
+  "redisCacheKey": "string"
+}'
