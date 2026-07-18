@@ -1,0 +1,352 @@
+using AutoMapper;
+using Kidzy.Framework.Common.Helpers;
+using Kidzy.Framework.Core.ExceptionHandling;
+using Kidzy.Framework.Data.Http.Extensions;
+using Kidzy.Framework.Pod;
+using Kidzy.Framework.Pod.Auth;
+using KidzyBank.Financial.Core.Application.Commands.CardTransfer;
+using KidzyBank.Financial.Core.Application.Commands.CardTransfer.Models;
+using KidzyBank.Financial.Data.Pod.OperatorServiceAggregate;
+using KidzyBank.Financial.Data.Pod.Settings;
+using KidzyBank.SharedGrpc.Settings;
+using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
+using System;
+using System.Globalization;
+using System.Linq;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading.Tasks;
+using System.Transactions;
+
+namespace KidzyBank.Financial.Data.Pod.CardTransferAggregate
+{
+    public class CardTransferRepository : PodiumRepository, ICardTransferRepository
+    {
+        private readonly PodroSettings _podroSettings;
+        private readonly CardTransferSettings _cardTransferSettings;
+        private readonly ILogger<CardTransferRepository> _logger;
+        private readonly IBusinessAuthentication _businessAuthentication;
+        private readonly IKidzyHttpAccessor _kidzyHttpAccessor;
+        private readonly BusinessInfo _businessInfo;
+
+        public CardTransferRepository(BusinessInfo businessInfo, IHttpClientFactory client, PodroSettings podroSettings, IKidzyHttpAccessor kidzyHttpAccessor,
+            IBusinessAuthentication businessAuthentication, ILogger<CardTransferRepository> logger, CardTransferSettings cardTransferSettings) : base(client, kidzyHttpAccessor, businessAuthentication, nameof(ICardTransferRepository))
+        {
+            _podroSettings = podroSettings;
+            _logger = logger;
+            _businessAuthentication = businessAuthentication;
+            _kidzyHttpAccessor = kidzyHttpAccessor;
+            _cardTransferSettings = cardTransferSettings;
+            _businessInfo = businessInfo;
+        }
+
+        public async Task<CardTransferQueryResult> CardTransferAsync(CardTransferQuery query)
+        {
+            var Client = GetClient();
+            var token = _businessInfo.ApiToken;
+            Client.DefaultRequestHeaders.Authorization =
+               new AuthenticationHeaderValue("Bearer", "7245126630-64990800a230406791f049b4e0b55852.XzIwMjUx");
+
+            var dateTime = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture);
+            var orgCode = "4321";
+            var randomString = _cardTransferSettings.BusinessId + "AB";
+            var sumInput = orgCode + randomString + dateTime;
+
+            var total = Encoding.ASCII.GetBytes(sumInput).Sum(b => b);
+
+            var TransactionId = $"{orgCode}-{randomString}-{dateTime}-{total}";
+            var MerchantCode = _cardTransferSettings.MerchantCode;
+            var TerminalCode = _cardTransferSettings.TerminalCode;
+
+            var requestBody = new
+            {
+                apiKey = _podroSettings.CardTransferApiKey,
+                productEntityId = _podroSettings.CardTransferProductId,
+                providerParameters = new
+                {
+                    body = new
+                    {
+                        query.SourceCardNumber,
+                        query.DestinationCardNumber,
+                        query.ClientMobileNumber,
+                        query.ClientDeviceId,
+                        query.ClientPlatform,
+                        query.ClientIP,
+                        query.Amount,
+                        TerminalCode,
+                        query.Pin2,
+                        query.Cvv2,
+                        query.ExpireMonth,
+                        query.ExpireYear,
+                        query.DesCardName,
+                        query.AuthorizeRefNumber,
+                        query.ClientEmail,
+                        query.ClientUserAgent,
+                        query.TransferFromDesc,
+                        query.TransferToDesc,
+                        MerchantCode,
+                        TransactionId
+                    }
+                }
+            };
+
+            var result = await Client.PostAsJsonAsync<dynamic, PodResponse<PodiumResponse>>("consumers/services/do", requestBody);
+            
+            if (result == null)
+                throw new KidzyException("Response is null");
+
+            if (result.HasError)
+                throw new KidzyException(result.Message);
+
+            var serviceResponse = JsonConvert.DeserializeObject<CardTransferView>(result.Result.Result);
+            var queryResult = CardTransferQueryResult.Success();
+            queryResult.Entity = serviceResponse;
+            queryResult.TransactionId = TransactionId;
+
+            return queryResult;
+        }
+
+        public async Task<CardTransferQueryResult> GetDestinationCardInfoAsync(GetDestinationCardInfoQuery query)
+        {
+            var Client = GetClient();
+            var token = _businessInfo.ApiToken;
+            //Client.DefaultRequestHeaders.Authorization =
+            //   new AuthenticationHeaderValue("Bearer", token);
+            Client.DefaultRequestHeaders.Authorization =
+               new AuthenticationHeaderValue("Bearer", "7245126630-64990800a230406791f049b4e0b55852.XzIwMjUx");
+            var MerchantCode = _cardTransferSettings.MerchantCode;
+            var TerminalCode = _cardTransferSettings.TerminalCode;
+            var requestBody = new
+            {
+                apiKey = _podroSettings.GetDestinationCardInfoApiKey,
+                productEntityId = _podroSettings.GetDestinationCardInfoProductId,
+                providerParameters = new
+                {
+                    body = new
+                    {
+                        query.SourceCardNumber,
+                        query.DestinationCardNumber,
+                        query.ClientMobileNumber,
+                        query.ClientDeviceId,
+                        query.ClientPlatform,
+                        query.ClientIP,
+                        Language = "Fa",
+                        query.Amount,
+                        TerminalCode,
+                        MerchantCode
+                    }
+                }
+            };
+
+            var json = JsonConvert.SerializeObject(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var httpResponse = await Client.PostAsync("consumers/services/do", content);
+            var result = await httpResponse.Content.ReadAsStringAsync();
+            _logger.LogInformation("GetDestinationCardInfo, {podiumResult}", result);
+
+            var response = JsonConvert.DeserializeObject<NewPodiumResponse>(result);
+            // var response1 = JsonConvert.DeserializeObject<PodResponse<PodiumResponse>>(result);
+
+            if (response == null)
+                throw new KidzyException("Response is null");
+
+            if (response.HasError)
+                throw new KidzyException(response.Message);
+
+            var serviceResponse = JsonConvert.DeserializeObject<CardTransferView>(response.Result);
+            var queryResult = CardTransferQueryResult.Success();
+            queryResult.Entity = serviceResponse;
+
+            return queryResult;
+        }
+        public async Task<InquiryLastTransactionQueryResult> InquiryLastTransactionAsync(InquiryLastTransactionQuery query)
+        {
+            var Client = GetClient();
+            var token = _businessInfo.ApiToken;
+            //Client.DefaultRequestHeaders.Authorization =
+            //   new AuthenticationHeaderValue("Bearer", token);
+            Client.DefaultRequestHeaders.Authorization =
+               new AuthenticationHeaderValue("Bearer", "7245126630-64990800a230406791f049b4e0b55852.XzIwMjUx");
+
+            var requestBod1y = new
+            {
+                apiKey = _podroSettings.InquiryLastTransactionApiKey,
+                productEntityId = _podroSettings.InquiryLastTransactionProductId,
+                providerParameters = new
+                {
+                    body = new
+                    {
+                        query.TransactionId
+                    }
+                }
+            };
+            //var requestBody = new PodroRequest<InquiryLastTransactionBody>
+            //{
+            //    ApiKey = _podroSettings.InquiryLastTransactionApiKey,
+            //    ProductEntityId = _podroSettings.InquiryLastTransactionProductId,
+            //    ProviderParameters = new PodroProviderParameters<InquiryLastTransactionBody>
+            //    {
+            //        Body = new InquiryLastTransactionBody
+            //        {
+            //            TransactionId = query.TransactionId
+            //        }
+            //    }
+            //};
+            var payload = new PodroRequest
+            {
+                ApiKey = _podroSettings.InquiryLastTransactionApiKey,
+                ProductEntityId = _podroSettings.InquiryLastTransactionProductId,
+                ProviderParameters = new PodroProviderParameters
+                {
+                    Body = new InquiryLastTransactionBody
+                    {
+                        TransactionId = query.TransactionId
+                    }
+                }
+            };
+
+            // لاگ کردن برای دیدن دقیق ساختار
+            var json = System.Text.Json.JsonSerializer.Serialize(payload);
+            _logger.LogInformation("Final JSON Payload: {json}", json);
+            try
+            {
+                await Client.PostAsJsonAsync<PodroRequest, PodResponse<PodiumResponse>>(
+                              "consumers/services/do",
+                              new PodroRequest
+                              {
+                                  ApiKey = _podroSettings.InquiryLastTransactionApiKey,
+                                  ProductEntityId = _podroSettings.InquiryLastTransactionProductId,
+                                  ProviderParameters = new PodroProviderParameters
+                                  {
+                                      Body = new InquiryLastTransactionBody
+                                      {
+                                          TransactionId = query.TransactionId
+                                      }
+                                  }
+                              });
+
+            }
+            catch (Exception ex)
+            {
+
+                throw;
+            }
+            //var result = await Client.PostAsJsonAsync<PodroRequest<InquiryLastTransactionBody>, PodResponse<PodiumResponse>>("consumers/services/do", requestBody, HttpRequestSetting.CamelCase);
+
+            //if (result == null)
+            //    throw new KidzyException("Response is null");
+
+            //if (result.HasError)
+            //    throw new KidzyException(result.Message);
+
+            //var serviceResponse = JsonConvert.DeserializeObject<InquiryLastTransactionView>(result.Result.Result);
+            var queryResult = InquiryLastTransactionQueryResult.Success();
+          //  queryResult.Entity = serviceResponse;
+
+            return queryResult;
+        }
+
+        public async Task<RequestDynamicPinCodeQueryResult> RequestDynamicPinCodeAsync(RequestDynamicPinCodeQuery query)
+        {
+            var Client = GetClient();
+            var token = _businessInfo.ApiToken;
+            Client.DefaultRequestHeaders.Authorization =
+               new AuthenticationHeaderValue("Bearer", "7245126630-64990800a230406791f049b4e0b55852.XzIwMjUx");
+            var cardAccepName = query.DestinationName ?? "مخاطب";
+            var requestBody = new
+            {
+                apiKey = _podroSettings.RequestDynamicPinCodeApiKey,
+                productEntityId = _podroSettings.RequestDynamicPinCodeProductId,
+                providerParameters = new
+                {
+                    body = new
+                    {
+                        query.CardNumber,
+                        query.PayeeCard,
+                        Action = "46",
+                        CardAcceptorEmail = "Mock@gmail.com",
+                        CardAcceptorName = cardAccepName,
+                        query.Amount,
+                        CardAcceptorTel = "09251212121",
+                        CardAcceptorUrl = "https://pod.ir",
+                        TerminalTypeCode = "59"
+                    }
+                }
+            };
+
+            var json = JsonConvert.SerializeObject(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var httpResponse = await Client.PostAsync("consumers/services/do", content);
+            var result = await httpResponse.Content.ReadAsStringAsync();
+            _logger.LogInformation("RequestDynamicPinCode, {podiumResult}", result);
+
+            var response = JsonConvert.DeserializeObject<NewPodiumResponse>(result);
+
+            if (response == null)
+                throw new KidzyException("Response is null");
+
+            if (response.HasError)
+                throw new KidzyException(response.Message);
+
+            var serviceResponse = JsonConvert.DeserializeObject<RequestDynamicPinCodeView>(response.Result);
+            var queryResult = RequestDynamicPinCodeQueryResult.Success();
+            queryResult.Entity = serviceResponse;
+
+            return queryResult;
+        }
+        //public class PodroRequest<TBody>
+        //{
+        //    [JsonPropertyName("apiKey")]
+        //    public string ApiKey { get; set; }
+
+        //    [JsonPropertyName("productEntityId")]
+        //    public string ProductEntityId { get; set; }
+
+        //    [JsonPropertyName("providerParameters")]
+        //    public PodroProviderParameters<TBody> ProviderParameters { get; set; }
+        //}
+
+        //public class PodroProviderParameters<TBody>
+        //{
+        //    [JsonPropertyName("body")]
+        //    public TBody Body { get; set; }
+        //}
+        //public class InquiryLastTransactionBody
+        //{
+        //    [JsonPropertyName("TransactionId")]
+        //    public string TransactionId { get; set; }
+        //}
+        public class PodroRequest
+        {
+            [JsonPropertyName("apiKey")]
+            public string ApiKey { get; set; }
+
+            [JsonPropertyName("productEntityId")]
+            public string ProductEntityId { get; set; }
+
+            [JsonPropertyName("providerParameters")]
+            public PodroProviderParameters ProviderParameters { get; set; }
+        }
+
+        public class PodroProviderParameters
+        {
+            [JsonPropertyName("body")]
+            public object Body { get; set; }
+        }
+
+        public class InquiryLastTransactionBody
+        {
+            [JsonPropertyName("TransactionId")]
+            public string TransactionId { get; set; }
+        }
+
+    }
+
+
+}
